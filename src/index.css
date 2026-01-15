@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+/* Optionnel : pour que le fond soit toujours sombre */
+:root {
+  background-color: #1e1f22;
+  color: white;
+}
