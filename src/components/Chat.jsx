@@ -19,11 +19,8 @@ export const Chat = ({ chatId, userId }) => {
   const [editingMsgId, setEditingMsgId] = useState(null);
   const messagesEndRef = useRef(null);
 
-  // 1. Synchronisation des messages en temps réel
   useEffect(() => {
     fetchMessages();
-    
-    // Écoute les nouveaux messages, les modifications et les suppressions
     const channel = supabase
       .channel(`chat:${chatId}`)
       .on('postgres_changes', { 
@@ -55,7 +52,6 @@ export const Chat = ({ chatId, userId }) => {
 
   useEffect(scrollToBottom, [messages]);
 
-  // 2. Logique de Notification Push
   const sendNotification = async (messageContent) => {
     try {
       const { data: members } = await supabase
@@ -72,7 +68,7 @@ export const Chat = ({ chatId, userId }) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json; charset=utf-8",
-          "Authorization": "Basic TON_CODE_REST_API" // À mettre dans tes variables d'env Netlify idéalement
+          "Authorization": "Basic YOUR_REST_API_KEY" 
         },
         body: JSON.stringify({
           app_id: "6f68c65b-97c2-4bcd-965e-905b3baed48f",
@@ -87,64 +83,71 @@ export const Chat = ({ chatId, userId }) => {
     }
   };
 
-  // 3. Gestion de l'envoi et de la modification
-  const handleSend = async (e) => {
-    e.preventDefault();
-    if (!text.trim() && selectedFiles.length === 0) return;
+const handleSend = async (e) => {
+  e.preventDefault();
+  // On vérifie qu'il y a soit du texte, soit des images
+  if (!text.trim() && selectedFiles.length === 0) return;
 
-    setIsUploading(true);
+  setIsUploading(true);
 
-    try {
-      if (editingMsgId) {
-        // --- MISE À JOUR ---
-        await supabase
-          .from('messages')
-          .update({ content: text, is_edited: true })
-          .eq('id', editingMsgId);
-        setEditingMsgId(null);
-      } else {
-        // --- NOUVEAU MESSAGE ---
-        let imageUrls = [];
+  try {
+    if (editingMsgId) {
+      // --- MODE EDITION ---
+      await supabase
+        .from('messages')
+        .update({ content: text, is_edited: true })
+        .eq('id', editingMsgId);
+      setEditingMsgId(null);
+    } else {
+      // --- MODE ENVOI (Le point critique) ---
+      let imageUrls = [];
 
-        // Upload des images vers le Storage Supabase
+      // 1. On attend que TOUTES les images soient uploadées avant de continuer
+      if (selectedFiles.length > 0) {
         for (const file of selectedFiles) {
-          const fileName = `${Date.now()}-${file.name}`;
+          const fileName = `${Date.now()}-${file.name.replace(/\s/g, '_')}`;
           const { data, error: uploadError } = await supabase.storage
-            .from('chat-attachments')
+            .from('chat-media')
             .upload(fileName, file);
 
-          if (data) {
+          if (uploadError) {
+            console.error("Erreur upload:", uploadError.message);
+          } else if (data) {
             const { data: urlData } = supabase.storage
-              .from('chat-attachments')
+              .from('chat-media')
               .getPublicUrl(fileName);
             imageUrls.push(urlData.publicUrl);
           }
         }
-
-        const { error: insertError } = await supabase.from('messages').insert([{
-          chat_id: chatId,
-          user_id: userId,
-          content: text,
-          images: imageUrls
-        }]);
-
-        if (!insertError) {
-          sendNotification(text || "📷 Image reçue");
-        }
       }
 
-      // Reset
-      setText('');
-      setSelectedFiles([]);
-      setPreviews([]);
-    } catch (err) {
-      console.error("Erreur d'envoi:", err);
-    } finally {
-      setIsUploading(false);
-    }
-  };
+      // 2. On insère dans la base de données UNIQUEMENT après l'upload
+      // On s'assure que imageUrls est bien un tableau envoyé dans la colonne 'images'
+      const { error: insertError } = await supabase.from('messages').insert([{
+        chat_id: chatId,
+        user_id: userId,
+        content: text.trim(), // Le texte reste du texte
+        images: imageUrls    // Les URLs vont STRICTEMENT dans la colonne images
+      }]);
 
-  // 4. Suppression d'un message
+      if (!insertError) {
+        sendNotification(text || "📷 Image reçue");
+      } else {
+        console.error("Erreur insertion message:", insertError.message);
+      }
+    }
+
+    // 3. Reset complet de l'interface
+    setText('');
+    setSelectedFiles([]);
+    setPreviews([]);
+  } catch (err) {
+    console.error("Erreur globale:", err);
+  } finally {
+    setIsUploading(false);
+  }
+};
+
   const handleDelete = async (id) => {
     if (window.confirm("Supprimer ce message ?")) {
       await supabase.from('messages').delete().eq('id', id);
@@ -153,8 +156,7 @@ export const Chat = ({ chatId, userId }) => {
 
   return (
     <div className="flex flex-col h-full bg-[#313338] overflow-hidden">
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) => (
           <div key={msg.id} className={`flex ${msg.user_id === userId ? 'justify-end' : 'justify-start'}`}>
             <div className={`max-w-[75%] p-3 rounded-xl shadow-sm ${
@@ -163,7 +165,7 @@ export const Chat = ({ chatId, userId }) => {
               <div className="flex justify-between items-center gap-4 mb-1">
                 <span className="text-[10px] font-bold text-indigo-300">{msg.profiles?.username}</span>
                 {msg.user_id === userId && (
-                  <div className="flex gap-2 opacity-0 hover:opacity-100 transition-opacity">
+                  <div className="flex gap-2">
                     <button onClick={() => { setEditingMsgId(msg.id); setText(msg.content); }}><Edit2 size={12}/></button>
                     <button onClick={() => handleDelete(msg.id)}><Trash2 size={12} className="text-red-400"/></button>
                   </div>
@@ -172,9 +174,20 @@ export const Chat = ({ chatId, userId }) => {
 
               {msg.content && <p className="text-sm break-words">{msg.content}</p>}
               
-              {msg.images?.map((img, i) => (
-                <img key={i} src={img} className="mt-2 rounded-lg max-h-64 w-full object-cover border border-black/10" alt="" />
-              ))}
+              {/* AFFICHAGE DES IMAGES */}
+              {msg.images && msg.images.length > 0 && (
+                <div className="mt-2 space-y-2">
+                  {msg.images.map((img, i) => (
+                    <img 
+                      key={i} 
+                      src={img} 
+                      className="rounded-lg max-h-64 w-full object-cover border border-black/20" 
+                      alt="" 
+                      onError={(e) => e.target.style.display = 'none'}
+                    />
+                  ))}
+                </div>
+              )}
               
               <div className="text-[9px] opacity-40 mt-1 text-right">
                 {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -186,7 +199,7 @@ export const Chat = ({ chatId, userId }) => {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Prévisualisation */}
+      {/* Prévisualisation avant envoi */}
       {previews.length > 0 && (
         <div className="flex gap-3 p-3 bg-[#2b2d31] border-t border-white/5 overflow-x-auto">
           {previews.map((url, index) => (
@@ -204,7 +217,6 @@ export const Chat = ({ chatId, userId }) => {
         </div>
       )}
 
-      {/* Input Form */}
       <div className="p-4 bg-[#313338]">
         <form onSubmit={handleSend} className="flex items-center gap-3 bg-[#383a40] rounded-2xl px-4 py-2.5">
           <label className={`hover:text-white transition cursor-pointer ${editingMsgId ? 'text-gray-600' : 'text-gray-400'}`}>
@@ -230,7 +242,7 @@ export const Chat = ({ chatId, userId }) => {
             />
           </div>
 
-          <button disabled={isUploading} type="submit" className="text-indigo-400 hover:scale-105 transition">
+          <button disabled={isUploading} type="submit" className="text-indigo-400">
             {isUploading ? <Loader2 className="animate-spin" size={20} /> : editingMsgId ? <Check size={22} /> : <Send size={22} />}
           </button>
           
